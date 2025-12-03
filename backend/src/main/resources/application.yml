@@ -1,0 +1,37 @@
+server:
+  port: 8080
+
+spring:
+  datasource:
+    url: jdbc:mysql://localhost:3306/mido?useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&characterEncoding=utf8&useUnicode=true
+    username: root
+    password: 050612
+    driver-class-name: com.mysql.cj.jdbc.Driver
+
+  mvc:
+    pathmatch:
+      matching-strategy: ant_path_matcher
+
+  jackson:
+    date-format: yyyy-MM-dd HH:mm:ss
+    time-zone: GMT+8
+
+mybatis-plus:
+  configuration:
+    log-impl: org.apache.ibatis.logging.slf4j.Slf4jImpl
+    map-underscore-to-camel-case: true
+
+logging:
+  level:
+    com.mido.backend: debug
+    com.baomidou: debug
+
+app:
+  upload:
+    root-dir: uploads
+    base-url: http://localhost:8080/uploads
+
+security:
+  jwt:
+    secret: ${JWT_SECRET:change-me-change-me-change-me-change-123456}
+    expiration-minutes: 120
