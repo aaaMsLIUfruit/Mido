@@ -22,9 +22,17 @@ public class NoteServiceImpl extends ServiceImpl<NoteMapper, Note> implements No
 
     private final NoteFolderMapper noteFolderMapper;
 
+    private static final String DEFAULT_FOLDER_NAME = "未分类";
+
     @Override
     public Note createNote(Note note) {
-        validateFolderOwnership(note.getFolderId(), note.getUserId());
+        Long folderId = note.getFolderId();
+        if (folderId == null) {
+            folderId = ensureDefaultFolder(note.getUserId());
+            note.setFolderId(folderId);
+        } else {
+            validateFolderOwnership(folderId, note.getUserId());
+        }
         note.setIsDeleted(0);
         LocalDateTime now = LocalDateTime.now();
         note.setCreatedAt(now);
@@ -108,6 +116,25 @@ public class NoteServiceImpl extends ServiceImpl<NoteMapper, Note> implements No
         if (folder == null) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "文件夹不存在");
         }
+    }
+
+    private Long ensureDefaultFolder(Long userId) {
+        NoteFolder existing = noteFolderMapper.selectOne(new LambdaQueryWrapper<NoteFolder>()
+                .eq(NoteFolder::getUserId, userId)
+                .eq(NoteFolder::getIsDeleted, 0)
+                .isNull(NoteFolder::getParentId)
+                .eq(NoteFolder::getName, DEFAULT_FOLDER_NAME));
+        if (existing != null) {
+            return existing.getId();
+        }
+        NoteFolder folder = new NoteFolder();
+        folder.setUserId(userId);
+        folder.setName(DEFAULT_FOLDER_NAME);
+        folder.setParentId(null);
+        folder.setIsDeleted(0);
+        folder.setCreatedAt(LocalDateTime.now());
+        noteFolderMapper.insert(folder);
+        return folder.getId();
     }
 }
 

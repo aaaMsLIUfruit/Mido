@@ -27,6 +27,8 @@ import org.springframework.web.server.ResponseStatusException;
 @RequiredArgsConstructor
 public class NoteFolderServiceImpl extends ServiceImpl<NoteFolderMapper, NoteFolder> implements NoteFolderService {
 
+    private static final String DEFAULT_FOLDER_NAME = "未分类";
+
     private final NoteMapper noteMapper;
 
     @Override
@@ -127,6 +129,9 @@ public class NoteFolderServiceImpl extends ServiceImpl<NoteFolderMapper, NoteFol
         if (parent == null) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "父文件夹不存在");
         }
+        if (isDefaultRoot(parent)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "默认文件夹下不能创建子文件夹");
+        }
         if (currentFolderId != null) {
             List<NoteFolder> allFolders = this.lambdaQuery()
                     .eq(NoteFolder::getUserId, userId)
@@ -136,6 +141,10 @@ public class NoteFolderServiceImpl extends ServiceImpl<NoteFolderMapper, NoteFol
                 throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "不能移动到子文件夹");
             }
         }
+    }
+
+    private boolean isDefaultRoot(NoteFolder folder) {
+        return folder.getParentId() == null && DEFAULT_FOLDER_NAME.equals(folder.getName());
     }
 
     private Set<Long> collectDescendantIds(Long rootId, List<NoteFolder> folders) {

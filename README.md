@@ -10,3 +10,6 @@ AI-powered conversation workspace where all chats are saved and managed like fil
 
 12.2 解决了上述问题，除了图片都可以存在mysql中  
 完成了mysql建表，建表语句已更新  
+
+12.5 完成了登录和笔记系统前后端，待优化
+

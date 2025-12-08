@@ -16,11 +16,12 @@ public final class SecurityUtils {
             return Optional.empty();
         }
         Object principal = authentication.getPrincipal();
-        if (principal instanceof UserDetails userDetails) {
+        if (principal instanceof UserDetails) {
+            UserDetails userDetails = (UserDetails) principal;
             return Optional.ofNullable(userDetails.getUsername());
         }
-        if (principal instanceof String str) {
-            return Optional.ofNullable(str);
+        if (principal instanceof String) {
+            return Optional.of((String) principal);
         }
         return Optional.empty();
     }
