@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 // @ts-ignore
 import FolderTree, { type TreeNode } from '../components/FolderTree.vue'
 // @ts-ignore
@@ -9,6 +9,7 @@ import NoteEditor from '../components/NoteEditor.vue'
 import { useNoteStore } from '../stores/noteStore'
 import type { FolderNode } from '../api/folder'
 import type { NoteSummary } from '../api/note'
+import { sendAiChat, type AiMessage } from '../api/ai'
 
 const noteStore = useNoteStore()
 const router = useRouter()
@@ -38,6 +39,195 @@ const searchKeyword = ref('')
 const workspaceSettingsVisible = ref(false)
 const userDisplayName = ref(localStorage.getItem('username') || 'Mido 用户')
 const userEmail = ref(localStorage.getItem('email') || '未设置邮箱')
+
+type AiConversationMessage = {
+  id: string
+  role: AiMessage['role']
+  content: string
+  timestamp: number
+}
+
+type AiSession = {
+  id: string
+  title: string
+  createdAt: number
+  messages: AiConversationMessage[]
+}
+
+const AI_STORAGE_KEY = 'mido-ai-sessions'
+
+const readAiSessions = (): AiSession[] => {
+  const raw = localStorage.getItem(AI_STORAGE_KEY)
+  if (!raw) return []
+  try {
+    const parsed = JSON.parse(raw) as AiSession[]
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
+}
+
+const aiSessions = ref<AiSession[]>(readAiSessions())
+const activeAiSessionId = ref<string | null>(aiSessions.value[0]?.id ?? null)
+const aiInput = ref('')
+const aiLoading = ref(false)
+const isAiMode = ref(false)
+const aiSystemPrompt =
+  '你是 Mido AI，一位友好且高效的创作助手。回答要使用简体中文，保持专业又有温度的语气。'
+const isFolderTreeCollapsed = ref(false)
+const isAiSessionCollapsed = ref(false)
+
+const createId = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+
+const saveAiSessions = () => {
+  localStorage.setItem(AI_STORAGE_KEY, JSON.stringify(aiSessions.value))
+}
+
+watch(
+  aiSessions,
+  () => {
+    saveAiSessions()
+  },
+  { deep: true },
+)
+
+const currentAiSession = computed<AiSession | null>(() => {
+  if (!activeAiSessionId.value) {
+    return null
+  }
+  return aiSessions.value.find((session) => session.id === activeAiSessionId.value) ?? null
+})
+
+const currentAiMessages = computed<AiConversationMessage[]>(() => currentAiSession.value?.messages ?? [])
+
+const startNewAiSession = () => {
+  const session: AiSession = {
+    id: createId(),
+    title: '新的对话',
+    createdAt: Date.now(),
+    messages: [],
+  }
+  aiSessions.value = [session, ...aiSessions.value]
+  activeAiSessionId.value = session.id
+  isAiMode.value = true
+  return session
+}
+
+const selectAiSession = (id: string) => {
+  activeAiSessionId.value = id
+  isAiMode.value = true
+}
+
+const deleteAiSession = (id: string) => {
+  const index = aiSessions.value.findIndex((session) => session.id === id)
+  if (index === -1) return
+  aiSessions.value.splice(index, 1)
+  if (activeAiSessionId.value === id) {
+    activeAiSessionId.value = aiSessions.value[0]?.id ?? null
+    if (!activeAiSessionId.value) {
+      isAiMode.value = false
+    }
+  }
+}
+
+const fallbackAiTitle = (text: string) => {
+  const clean = text.replace(/[\s\r\n]+/g, '').trim()
+  if (!clean) return '新的对话'
+  return clean.slice(0, 8)
+}
+
+const aiTitleSystemPrompt =
+  '你是标题助手，请将用户的原始问题概括为不超过8个汉字的标题，只输出标题本身，不要额外说明。'
+
+const summarizeQuestionTitle = async (question: string) => {
+  try {
+    const reply = await sendAiChat([
+      { role: 'system', content: aiTitleSystemPrompt },
+      { role: 'user', content: question },
+    ])
+    const clean = reply.replace(/["'“”。，,!?！？\s]/g, '').trim().slice(0, 8)
+    return clean || fallbackAiTitle(question)
+  } catch (err) {
+    return fallbackAiTitle(question)
+  }
+}
+
+const ensureAiSession = (): AiSession => {
+  if (currentAiSession.value) {
+    return currentAiSession.value
+  }
+  return startNewAiSession()
+}
+
+const openAiPanel = () => {
+  isAiMode.value = true
+  if (!currentAiSession.value) {
+    startNewAiSession()
+  }
+}
+
+const exitAiMode = () => {
+  isAiMode.value = false
+}
+
+const toggleFolderTreeSection = () => {
+  isFolderTreeCollapsed.value = !isFolderTreeCollapsed.value
+}
+
+const toggleAiSessionSection = () => {
+  isAiSessionCollapsed.value = !isAiSessionCollapsed.value
+}
+
+const handleSendAiMessage = async () => {
+  const content = aiInput.value.trim()
+  if (!content || aiLoading.value) return
+  const session = ensureAiSession()
+  const shouldSummarizeTitle = session.messages.length === 0
+  if (!isAiMode.value) {
+    isAiMode.value = true
+  }
+  const userMessage: AiConversationMessage = {
+    id: createId(),
+    role: 'user',
+    content,
+    timestamp: Date.now(),
+  }
+  session.messages.push(userMessage)
+  aiInput.value = ''
+  aiLoading.value = true
+  try {
+    const payload: AiMessage[] = [
+      { role: 'system', content: aiSystemPrompt },
+      ...session.messages.map(({ role, content: msgContent }) => ({ role, content: msgContent })),
+    ]
+    const answerPromise = sendAiChat(payload)
+    const titlePromise = shouldSummarizeTitle ? summarizeQuestionTitle(content) : null
+    const answer = await answerPromise
+    session.messages.push({
+      id: createId(),
+      role: 'assistant',
+      content: answer,
+      timestamp: Date.now(),
+    })
+    if (titlePromise) {
+      session.title = await titlePromise
+    }
+  } catch (error) {
+    session.messages.push({
+      id: createId(),
+      role: 'assistant',
+      content: '抱歉，Mido AI 暂时无法响应，请稍后重试。',
+      timestamp: Date.now(),
+    })
+  } finally {
+    aiLoading.value = false
+  }
+}
+
+const formatAiSessionDate = (timestamp: number) => {
+  const date = new Date(timestamp)
+  return `${date.getMonth() + 1}/${date.getDate()}`
+}
 
 onMounted(async () => {
   await noteStore.init()
@@ -81,10 +271,12 @@ const currentTreeKey = computed(() => {
 })
 
 const handleSelectFolder = async (id: string | null) => {
+  exitAiMode()
   await noteStore.selectFolder(id)
 }
 
 const handleSelectNote = async (id: string) => {
+  exitAiMode()
   await noteStore.selectNote(id)
 }
 
@@ -192,9 +384,7 @@ const handleNavClick = (item: { label: string; action?: string }) => {
     return
   }
   if (item.action === 'ai') {
-    ElMessageBox.alert('Mido AI 即将上线，敬请期待。', '提示', {
-      confirmButtonText: '好的',
-    })
+    openAiPanel()
     return
   }
   if (item.action === 'create-note') {
@@ -330,22 +520,63 @@ onBeforeUnmount(() => {
             </li>
           </ul>
         </div>
-        <FolderTree
-          class="folder-tree-wrapper"
-          :data="folderTreeWithNotes"
-          :current-key="currentTreeKey"
-          :loading="noteStore.state.loadingFolders"
-          :show-toolbar="false"
-          @select-folder="handleSelectFolder"
-          @select-note="handleSelectNote"
-          @create-folder="handleCreateFolder"
-          @rename-folder="handleRenameFolder"
-          @delete-folder="handleDeleteFolder"
-          @rename-note="handleRenameNoteFromTree"
-          @delete-note="handleDeleteNoteFromTree"
-          @move-folder="handleMoveFolder"
-          @move-note="handleMoveNote"
-        />
+        <div class="workspace-panel__section folder-section" :class="{ expanded: !isFolderTreeCollapsed }">
+          <div class="collapsible-header">
+            <p class="section-label">内容目录</p>
+            <button class="collapse-toggle" type="button" @click="toggleFolderTreeSection">
+              {{ isFolderTreeCollapsed ? '展开' : '收起' }}
+            </button>
+          </div>
+          <FolderTree
+            v-show="!isFolderTreeCollapsed"
+            class="folder-tree-wrapper"
+            :data="folderTreeWithNotes"
+            :current-key="currentTreeKey"
+            :loading="noteStore.state.loadingFolders"
+            :show-toolbar="false"
+            @select-folder="handleSelectFolder"
+            @select-note="handleSelectNote"
+            @create-folder="handleCreateFolder"
+            @rename-folder="handleRenameFolder"
+            @delete-folder="handleDeleteFolder"
+            @rename-note="handleRenameNoteFromTree"
+            @delete-note="handleDeleteNoteFromTree"
+            @move-folder="handleMoveFolder"
+            @move-note="handleMoveNote"
+          />
+        </div>
+        <div class="workspace-panel__section ai-session-section">
+          <div class="ai-session-header">
+            <p class="section-label">Mido AI 对话</p>
+            <div class="ai-session-actions">
+              <button class="ai-session-new" type="button" @click="startNewAiSession">+ 新对话</button>
+              <button class="collapse-toggle" type="button" @click="toggleAiSessionSection">
+                {{ isAiSessionCollapsed ? '展开' : '收起' }}
+              </button>
+            </div>
+          </div>
+          <transition name="section-fade">
+            <div v-show="!isAiSessionCollapsed">
+              <p v-if="aiSessions.length === 0" class="ai-session-placeholder">
+                还没有对话，点击上方按钮开启一次灵感碰撞。
+              </p>
+              <ul v-else class="ai-session-list">
+                <li
+                  v-for="session in aiSessions"
+                  :key="session.id"
+                  :class="['ai-session-item', { active: session.id === activeAiSessionId && isAiMode }]"
+                  @click="selectAiSession(session.id)"
+                >
+                  <div class="ai-session-item__title">{{ session.title }}</div>
+                  <div class="ai-session-item__meta">
+                    <span>{{ formatAiSessionDate(session.createdAt) }}</span>
+                    <button type="button" class="ai-session-delete" @click.stop="deleteAiSession(session.id)">×</button>
+                  </div>
+                </li>
+              </ul>
+            </div>
+          </transition>
+        </div>
       </aside>
       <div
         v-if="!isSidebarCollapsed"
@@ -355,10 +586,49 @@ onBeforeUnmount(() => {
     </div>
     <main class="workspace-main">
       <section class="note-workspace">
-        <div class="note-editor-wrapper">
+        <div v-if="isAiMode" class="ai-panel">
+          <div v-if="currentAiMessages.length" class="ai-conversation">
+            <div
+              v-for="message in currentAiMessages"
+              :key="message.id"
+              :class="['ai-message', message.role]"
+            >
+              <div class="ai-message__avatar">
+                {{ message.role === 'assistant' ? '✨' : userDisplayName.charAt(0).toUpperCase() }}
+              </div>
+              <div class="ai-message__bubble">
+                <p>{{ message.content }}</p>
+              </div>
+            </div>
+          </div>
+          <div v-else class="ai-hero">
+            <div class="ai-hero__avatar">🍎</div>
+            <h2>甜你心，知你意。</h2>
+            <p>询问、搜索或制作任何内容...</p>
+          </div>
+          <form class="ai-input-card" @submit.prevent="handleSendAiMessage">
+            <button class="ai-meta-button" type="button">@ 添加背景信息</button>
+            <textarea
+              v-model="aiInput"
+              :disabled="aiLoading"
+              rows="4"
+              placeholder="询问、搜索或制作任何内容..."
+            ></textarea>
+            <div class="ai-input-footer">
+              <div class="ai-input-hints">
+                <span>自动</span>
+                <span>👓</span>
+                <span>全部信息源</span>
+              </div>
+              <button class="ai-submit" type="submit" :disabled="aiLoading || !aiInput.trim()">
+                {{ aiLoading ? '思考中…' : '发送' }}
+              </button>
+            </div>
+          </form>
+        </div>
+        <div v-else class="note-editor-wrapper">
           <NoteEditor
             :note="noteStore.state.selectedNote"
-            :folders="noteStore.state.folders"
             :saving="noteStore.state.saving"
             @save="handleSaveNote"
           />
@@ -453,6 +723,8 @@ onBeforeUnmount(() => {
   gap: 24px;
   padding: 24px 18px 18px;
   min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .workspace-panel__header {
@@ -579,6 +851,23 @@ onBeforeUnmount(() => {
   text-transform: uppercase;
 }
 
+.collapsible-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.collapse-toggle {
+  border: none;
+  background: rgba(47, 52, 55, 0.08);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 12px;
+  color: #5c5e62;
+  cursor: pointer;
+}
+
 .nav-list {
   list-style: none;
   padding: 0;
@@ -606,11 +895,134 @@ onBeforeUnmount(() => {
   font-size: 16px;
 }
 
+.ai-session-section {
+  border-top: 1px solid rgba(47, 52, 55, 0.08);
+  padding-top: 18px;
+  margin-top: 0;
+  flex-shrink: 0;
+  order: 2;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.ai-session-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.ai-session-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.ai-session-new {
+  border: none;
+  background: transparent;
+  color: #5c5e62;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.ai-session-placeholder {
+  margin: 4px 0 0;
+  font-size: 13px;
+  color: #8a8f95;
+}
+
+.ai-session-section .section-fade > div {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: visible;
+}
+
+.ai-session-list {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow: visible;
+}
+
+.ai-session-item {
+  padding: 8px;
+  border-radius: 10px;
+  cursor: pointer;
+  background: rgba(255, 255, 255, 0.65);
+  border: 1px solid transparent;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.ai-session-item.active {
+  border-color: rgba(47, 52, 55, 0.18);
+  background: #fff;
+}
+
+.ai-session-item__title {
+  font-size: 13px;
+  color: #2f3437;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-session-item__meta {
+  font-size: 12px;
+  color: #a5a3a1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ai-session-delete {
+  border: none;
+  background: transparent;
+  color: #a5a3a1;
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+}
+
 .folder-tree-wrapper {
   flex: 1;
   display: flex;
   flex-direction: column;
   min-height: 0;
+  overflow: visible;
+}
+
+.folder-section {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  transition: flex 0.2s ease;
+  order: 1;
+  flex-shrink: 0;
+}
+
+.section-fade-enter-active,
+.section-fade-leave-active {
+  transition: opacity 0.3s cubic-bezier(0.4, 0, 0.2, 1), transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.section-fade-enter-from,
+.section-fade-leave-to {
+  opacity: 0;
+  transform: translateY(-4px);
+}
+
+.section-fade-enter-to,
+.section-fade-leave-from {
+  opacity: 1;
+  transform: translateY(0);
 }
 
 .workspace-panel__resizer {
@@ -639,6 +1051,143 @@ onBeforeUnmount(() => {
   background: #fff;
   border-radius: 0;
   box-shadow: none;
+}
+
+.ai-panel {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.ai-conversation {
+  flex: 1;
+  overflow-y: auto;
+  padding-right: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.ai-message {
+  display: flex;
+  gap: 12px;
+}
+
+.ai-message.user {
+  flex-direction: row-reverse;
+}
+
+.ai-message__avatar {
+  width: 40px;
+  height: 40px;
+  border-radius: 999px;
+  background: #f2f4f8;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+}
+
+.ai-message.user .ai-message__avatar {
+  background: #2f3437;
+  color: #fff;
+}
+
+.ai-message__bubble {
+  padding: 14px 18px;
+  border-radius: 20px;
+  background: #f5f7f9;
+  color: #2f3437;
+  max-width: 640px;
+  line-height: 1.6;
+}
+
+.ai-message.user .ai-message__bubble {
+  background: #2f3437;
+  color: #fff;
+}
+
+.ai-hero {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  text-align: center;
+  color: #2f3437;
+}
+
+.ai-hero__avatar {
+  width: 96px;
+  height: 96px;
+  border-radius: 999px;
+  background: #fff;
+  box-shadow: 0 12px 30px rgba(15, 23, 42, 0.15);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 42px;
+}
+
+.ai-input-card {
+  border: 1px solid rgba(47, 52, 55, 0.12);
+  border-radius: 24px;
+  padding: 18px 22px;
+  background: #fff;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.ai-meta-button {
+  border: none;
+  background: rgba(47, 52, 55, 0.06);
+  border-radius: 999px;
+  padding: 6px 14px;
+  font-size: 13px;
+  color: #5c5e62;
+  align-self: flex-start;
+  cursor: pointer;
+}
+
+.ai-input-card textarea {
+  border: none;
+  resize: none;
+  font-size: 16px;
+  font-family: inherit;
+  outline: none;
+  min-height: 96px;
+}
+
+.ai-input-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.ai-input-hints {
+  display: flex;
+  gap: 12px;
+  font-size: 13px;
+  color: #8a8f95;
+}
+
+.ai-submit {
+  border: none;
+  border-radius: 999px;
+  background: #2f3437;
+  color: #fff;
+  padding: 8px 20px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.ai-submit:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .sidebar-floating-toggle {

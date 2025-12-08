@@ -2,16 +2,15 @@
 import { onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import type { UploadFile } from 'element-plus'
-import type { FolderNode } from '../api/folder'
 import type { NoteDetail } from '../api/note'
 import { uploadImage } from '../api/upload'
 import { EditorContent, useEditor } from '@tiptap/vue-3'
 import StarterKit from '@tiptap/starter-kit'
 import Image from '@tiptap/extension-image'
+import { Extension, markInputRule } from '@tiptap/core'
 
 const props = defineProps<{
   note: NoteDetail | null
-  folders: FolderNode[]
   saving?: boolean
 }>()
 
@@ -29,6 +28,33 @@ const form = reactive({
 
 const imageWidth = ref(680)
 
+const boldInputRegex = /(?:^|[\s>])(\*\*|__|＊＊|＿＿)([^*_]+?)(\1)$/
+const italicInputRegex = /(?:^|[\s>])(\*|_|＊|＿)([^*_]+?)(\1)$/
+
+const markdownShortcuts = Extension.create({
+  name: 'markdownShortcuts',
+  addInputRules() {
+    const rules = []
+    if (this.editor.schema.marks.strong) {
+      rules.push(
+        markInputRule({
+          find: boldInputRegex,
+          type: this.editor.schema.marks.strong,
+        }),
+      )
+    }
+    if (this.editor.schema.marks.em) {
+      rules.push(
+        markInputRule({
+          find: italicInputRegex,
+          type: this.editor.schema.marks.em,
+        }),
+      )
+    }
+    return rules
+  },
+})
+
 const editor = useEditor({
   extensions: [
     StarterKit.configure({
@@ -36,10 +62,12 @@ const editor = useEditor({
         levels: [1, 2, 3, 4, 5, 6],
       },
     }),
+    markdownShortcuts,
     Image.extend({
       inline: false,
       addAttributes() {
         return {
+          ...this.parent?.(),
           width: {
             default: imageWidth.value,
             parseHTML: (element) => {

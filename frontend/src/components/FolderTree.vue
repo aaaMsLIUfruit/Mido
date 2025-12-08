@@ -333,7 +333,7 @@ const handleDrop = (dragNode: any, dropNode: any, dropType: 'before' | 'after' |
 
 .notion-tree {
   flex: 1;
-  overflow-y: auto;
+  overflow: visible;
   background: transparent;
   padding-right: 4px;
 }

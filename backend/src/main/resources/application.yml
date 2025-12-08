@@ -36,6 +36,14 @@ app:
     root-dir: uploads
     base-url: http://localhost:8080/uploads
 
+ai:
+  deepseek:
+    base-url: https://api.deepseek.com
+    chat-path: /chat/completions
+    model: deepseek-chat
+    temperature: 0.6
+    api-key: sk-1d5ee38356264df8bcd071ebc586db8d
+
 security:
   jwt:
     secret: ${JWT_SECRET:change-me-change-me-change-me-change-123456}
