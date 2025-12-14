@@ -47,4 +47,4 @@ ai:
 security:
   jwt:
     secret: ${JWT_SECRET:change-me-change-me-change-me-change-123456}
-    expiration-minutes: 120
+    expiration-minutes: 1440

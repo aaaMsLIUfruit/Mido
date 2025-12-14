@@ -28,6 +28,7 @@ replay_pid*
 /backend/uploads/
 /frontend/dist/
 /frontend/node_modules/
+/node_modules/
 /uploads/
 
 # Environment files

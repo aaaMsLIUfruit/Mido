@@ -123,6 +123,34 @@ const registerRules: FormRules<RegisterForm> = {
   ],
 }
 
+// Base64 URL 解码并正确处理 UTF-8 编码的中文字符
+const base64UrlDecode = (str: string): string => {
+  // 将 base64url 转换为 base64
+  let base64 = str.replace(/-/g, '+').replace(/_/g, '/')
+  
+  // 添加必要的 padding
+  while (base64.length % 4) {
+    base64 += '='
+  }
+  
+  try {
+    // 使用 atob 解码 base64
+    const binaryString = atob(base64)
+    
+    // 将 Latin-1 字符串转换为 UTF-8
+    const bytes = new Uint8Array(binaryString.length)
+    for (let i = 0; i < binaryString.length; i++) {
+      bytes[i] = binaryString.charCodeAt(i)
+    }
+    
+    // 使用 TextDecoder 将 UTF-8 bytes 解码为字符串
+    return new TextDecoder('utf-8').decode(bytes)
+  } catch (error) {
+    console.error('Base64 解码失败:', error)
+    throw error
+  }
+}
+
 const saveAuthPayload = (response: AuthResponse) => {
   const token = response.token ?? response.data?.token
   if (!token) {
@@ -130,14 +158,19 @@ const saveAuthPayload = (response: AuthResponse) => {
   }
   localStorage.setItem('token', token)
   try {
-    const payload = JSON.parse(atob(token.split('.')[1] ?? ''))
-    if (payload?.sub) {
-      localStorage.setItem('username', payload.sub)
+    const parts = token.split('.')
+    if (parts.length >= 2 && parts[1]) {
+      const decoded = base64UrlDecode(parts[1])
+      const payload = JSON.parse(decoded)
+      if (payload?.sub) {
+        localStorage.setItem('username', payload.sub)
+      }
+      if (payload?.email) {
+        localStorage.setItem('email', payload.email)
+      }
     }
-    if (payload?.email) {
-      localStorage.setItem('email', payload.email)
-    }
-  } catch {
+  } catch (error) {
+    console.error('解析 token 失败:', error)
     // ignore decode errors
   }
 }

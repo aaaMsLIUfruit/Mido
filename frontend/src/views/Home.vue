@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 // @ts-ignore
@@ -10,6 +10,10 @@ import { useNoteStore } from '../stores/noteStore'
 import type { FolderNode } from '../api/folder'
 import type { NoteSummary } from '../api/note'
 import { sendAiChat, type AiMessage } from '../api/ai'
+import chatApi, { type ChatResponse, type ChatDetailResponse, type ChatMessageResponse } from '../api/chat'
+import chatFolderApi, { type ChatFolderNode } from '../api/chatFolder'
+import noteApi from '../api/note'
+import { ElMessageBox, ElDialog, ElScrollbar, ElSkeleton, ElTag, ElEmpty } from 'element-plus'
 
 const noteStore = useNoteStore()
 const router = useRouter()
@@ -32,100 +36,235 @@ const workspaceNav = [
   { icon: '✨', label: 'Mido AI', action: 'ai' },
   { icon: '✎', label: '新建笔记', action: 'create-note' },
   { icon: '📁', label: '新建文件夹', action: 'create-folder' },
+  { icon: '🗂️', label: '新建对话文件夹', action: 'create-chat-folder' },
 ]
 
 const isSearchPanelVisible = ref(false)
 const searchKeyword = ref('')
 const workspaceSettingsVisible = ref(false)
-const userDisplayName = ref(localStorage.getItem('username') || 'Mido 用户')
-const userEmail = ref(localStorage.getItem('email') || '未设置邮箱')
+const userDisplayName = ref('Mido 用户')
+const userEmail = ref('未设置邮箱')
 
-type AiConversationMessage = {
-  id: string
-  role: AiMessage['role']
-  content: string
-  timestamp: number
-}
-
-type AiSession = {
-  id: string
-  title: string
-  createdAt: number
-  messages: AiConversationMessage[]
-}
-
-const AI_STORAGE_KEY = 'mido-ai-sessions'
-
-const readAiSessions = (): AiSession[] => {
-  const raw = localStorage.getItem(AI_STORAGE_KEY)
-  if (!raw) return []
+// Base64 URL 解码并正确处理 UTF-8 编码的中文字符
+const base64UrlDecode = (str: string): string => {
+  // 将 base64url 转换为 base64
+  let base64 = str.replace(/-/g, '+').replace(/_/g, '/')
+  
+  // 添加必要的 padding
+  while (base64.length % 4) {
+    base64 += '='
+  }
+  
   try {
-    const parsed = JSON.parse(raw) as AiSession[]
-    return Array.isArray(parsed) ? parsed : []
-  } catch {
-    return []
+    // 使用 atob 解码 base64
+    const binaryString = atob(base64)
+    
+    // 将 Latin-1 字符串转换为 UTF-8
+    const bytes = new Uint8Array(binaryString.length)
+    for (let i = 0; i < binaryString.length; i++) {
+      bytes[i] = binaryString.charCodeAt(i)
+    }
+    
+    // 使用 TextDecoder 将 UTF-8 bytes 解码为字符串
+    return new TextDecoder('utf-8').decode(bytes)
+  } catch (error) {
+    console.error('Base64 解码失败:', error)
+    throw error
   }
 }
 
-const aiSessions = ref<AiSession[]>(readAiSessions())
-const activeAiSessionId = ref<string | null>(aiSessions.value[0]?.id ?? null)
+// 从 JWT token 中解析用户信息
+const loadUserInfo = () => {
+  try {
+    const token = localStorage.getItem('token')
+    console.log('=== 开始加载用户信息 ===')
+    console.log('Token 存在:', !!token)
+    
+    if (token) {
+      const parts = token.split('.')
+      console.log('Token 部分数量:', parts.length)
+      
+      if (parts.length >= 2 && parts[1]) {
+        try {
+          // 使用改进的 base64 解码方法，正确处理中文字符
+          const decoded = base64UrlDecode(parts[1])
+          console.log('解码后的 payload 字符串:', decoded)
+          const payload = JSON.parse(decoded)
+          console.log('JWT Payload 对象:', payload)
+          console.log('Payload keys:', Object.keys(payload))
+          console.log('sub (用户名):', payload.sub)
+          console.log('email:', payload.email)
+          
+          if (payload?.sub) {
+            userDisplayName.value = payload.sub
+            console.log('✅ 设置用户名:', payload.sub)
+            // 同时更新 localStorage
+            localStorage.setItem('username', payload.sub)
+          } else {
+            console.warn('⚠️ Payload 中没有 sub 字段')
+          }
+          
+          if (payload?.email) {
+            userEmail.value = payload.email
+            console.log('✅ 设置邮箱:', payload.email)
+            // 同时更新 localStorage
+            localStorage.setItem('email', payload.email)
+          } else {
+            console.warn('⚠️ Payload 中没有 email 字段')
+            userEmail.value = '未设置邮箱'
+          }
+        } catch (parseError) {
+          console.error('解析 payload JSON 失败:', parseError)
+          throw parseError
+        }
+      } else {
+        console.warn('⚠️ Token 格式不正确，parts.length:', parts.length)
+      }
+    } else {
+      console.warn('⚠️ 没有找到 token')
+    }
+    
+    console.log('最终用户名:', userDisplayName.value)
+    console.log('最终邮箱:', userEmail.value)
+    console.log('=== 用户信息加载完成 ===')
+  } catch (error) {
+    console.error('❌ Failed to parse JWT token:', error)
+    // 如果解析失败，尝试从 localStorage 读取
+    const storedUsername = localStorage.getItem('username')
+    const storedEmail = localStorage.getItem('email')
+    console.log('尝试从 localStorage 读取:', { storedUsername, storedEmail })
+    
+    if (storedUsername) {
+      userDisplayName.value = storedUsername
+      console.log('从 localStorage 读取用户名:', storedUsername)
+    }
+    if (storedEmail) {
+      userEmail.value = storedEmail
+      console.log('从 localStorage 读取邮箱:', storedEmail)
+    }
+  }
+}
+
+// 立即加载用户信息（在组件初始化时）
+loadUserInfo()
+
+// 立即加载用户信息（在组件初始化时）
+loadUserInfo()
+
+const chatSessions = ref<ChatResponse[]>([])
+const activeChatId = ref<string | null>(null)
+const currentChatDetail = ref<ChatDetailResponse | null>(null)
+const chatLoading = ref(false)
+const selectedChatFolderId = ref<string | null>(null)
+const chatFolders = ref<ChatFolderNode[]>([])
+const loadingChatFolders = ref(false)
+
+const selectedMessageIds = ref<Set<string>>(new Set())
+const isSelectingMessages = ref(false)
+
 const aiInput = ref('')
 const aiLoading = ref(false)
 const isAiMode = ref(false)
 const aiSystemPrompt =
   '你是 Mido AI，一位友好且高效的创作助手。回答要使用简体中文，保持专业又有温度的语气。'
+const aiContextInfo = ref<string>('') // 背景信息
+const contextNoteTitle = ref<string>('') // 选中的笔记标题
+const showContextNoteDialog = ref(false) // 显示笔记选择对话框
+const contextNoteSearchKeyword = ref('') // 笔记搜索关键词
+const allNotesForContext = ref<{ id: string; title: string; folderId?: string; folderName: string }[]>([]) // 所有笔记列表
+const loadingContextNotes = ref(false) // 加载笔记中
 const isFolderTreeCollapsed = ref(false)
 const isAiSessionCollapsed = ref(false)
 
-const createId = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+const currentAiMessages = computed<ChatMessageResponse[]>(() => currentChatDetail.value?.messages ?? [])
 
-const saveAiSessions = () => {
-  localStorage.setItem(AI_STORAGE_KEY, JSON.stringify(aiSessions.value))
-}
-
-watch(
-  aiSessions,
-  () => {
-    saveAiSessions()
-  },
-  { deep: true },
-)
-
-const currentAiSession = computed<AiSession | null>(() => {
-  if (!activeAiSessionId.value) {
-    return null
+// Load chat sessions
+const loadChatSessions = async () => {
+  chatLoading.value = true
+  try {
+    const result = await chatApi.fetchChatList({
+      folderId: selectedChatFolderId.value ?? undefined,
+      page: 1,
+      pageSize: 100,
+    })
+    chatSessions.value = result.list
+    if (chatSessions.value.length > 0 && !activeChatId.value) {
+      activeChatId.value = chatSessions.value[0]?.id ?? null
+      if (activeChatId.value) {
+        await loadChatDetail(activeChatId.value)
+      }
+    }
+  } catch (error) {
+    ElMessage.error('加载对话列表失败')
+  } finally {
+    chatLoading.value = false
   }
-  return aiSessions.value.find((session) => session.id === activeAiSessionId.value) ?? null
-})
+}
 
-const currentAiMessages = computed<AiConversationMessage[]>(() => currentAiSession.value?.messages ?? [])
-
-const startNewAiSession = () => {
-  const session: AiSession = {
-    id: createId(),
-    title: '新的对话',
-    createdAt: Date.now(),
-    messages: [],
+// Load chat detail with messages
+const loadChatDetail = async (chatId: string) => {
+  try {
+    const detail = await chatApi.fetchChatById(chatId)
+    if (detail) {
+      currentChatDetail.value = detail
+      activeChatId.value = chatId
+    }
+  } catch (error) {
+    ElMessage.error('加载对话详情失败')
   }
-  aiSessions.value = [session, ...aiSessions.value]
-  activeAiSessionId.value = session.id
-  isAiMode.value = true
-  return session
 }
 
-const selectAiSession = (id: string) => {
-  activeAiSessionId.value = id
-  isAiMode.value = true
+const startNewAiSession = async () => {
+  try {
+    const newChat = await chatApi.createChat({
+      title: '新的对话',
+      folderId: selectedChatFolderId.value ?? undefined,
+    })
+    if (newChat) {
+      await loadChatSessions()
+      if (newChat.id) {
+        activeChatId.value = newChat.id
+        isAiMode.value = true
+        currentChatDetail.value = { ...newChat, messages: [] }
+      }
+    }
+  } catch (error) {
+    ElMessage.error('创建对话失败')
+  }
 }
 
-const deleteAiSession = (id: string) => {
-  const index = aiSessions.value.findIndex((session) => session.id === id)
-  if (index === -1) return
-  aiSessions.value.splice(index, 1)
-  if (activeAiSessionId.value === id) {
-    activeAiSessionId.value = aiSessions.value[0]?.id ?? null
-    if (!activeAiSessionId.value) {
-      isAiMode.value = false
+const selectAiSession = async (id: string) => {
+  activeChatId.value = id
+  isAiMode.value = true
+  await loadChatDetail(id)
+  selectedMessageIds.value.clear()
+  isSelectingMessages.value = false
+}
+
+const deleteAiSession = async (payload: { id: string }) => {
+  const id = payload.id
+  try {
+    await ElMessageBox.confirm('确定要删除这个对话吗？', '删除对话', {
+      type: 'warning',
+    })
+    await chatApi.deleteChat(id)
+    ElMessage.success('对话已删除')
+    if (activeChatId.value === id) {
+      activeChatId.value = null
+      currentChatDetail.value = null
+      if (chatSessions.value.length === 0) {
+        isAiMode.value = false
+      } else {
+        activeChatId.value = chatSessions.value[0]?.id ?? null
+        if (activeChatId.value) {
+          await loadChatDetail(activeChatId.value)
+        }
+      }
+    }
+    await loadChatSessions()
+  } catch (error: any) {
+    if (error !== 'cancel') {
+      ElMessage.error('删除对话失败')
     }
   }
 }
@@ -152,22 +291,17 @@ const summarizeQuestionTitle = async (question: string) => {
   }
 }
 
-const ensureAiSession = (): AiSession => {
-  if (currentAiSession.value) {
-    return currentAiSession.value
-  }
-  return startNewAiSession()
-}
-
-const openAiPanel = () => {
+const openAiPanel = async () => {
   isAiMode.value = true
-  if (!currentAiSession.value) {
-    startNewAiSession()
+  if (!activeChatId.value) {
+    await startNewAiSession()
   }
 }
 
 const exitAiMode = () => {
   isAiMode.value = false
+  selectedMessageIds.value.clear()
+  isSelectingMessages.value = false
 }
 
 const toggleFolderTreeSection = () => {
@@ -181,56 +315,367 @@ const toggleAiSessionSection = () => {
 const handleSendAiMessage = async () => {
   const content = aiInput.value.trim()
   if (!content || aiLoading.value) return
-  const session = ensureAiSession()
-  const shouldSummarizeTitle = session.messages.length === 0
-  if (!isAiMode.value) {
-    isAiMode.value = true
+  
+  // Ensure we have a chat session
+  if (!activeChatId.value) {
+    await startNewAiSession()
+    if (!activeChatId.value) {
+      ElMessage.error('创建对话失败')
+      return
+    }
   }
-  const userMessage: AiConversationMessage = {
-    id: createId(),
-    role: 'user',
-    content,
-    timestamp: Date.now(),
+
+  const shouldSummarizeTitle = !currentChatDetail.value || currentChatDetail.value.messages.length === 0
+  
+  // Save user message
+  try {
+    const userMessage = await chatApi.createChatMessage({
+      chatId: activeChatId.value,
+      role: 'user',
+      content,
+    })
+    if (userMessage && currentChatDetail.value) {
+      currentChatDetail.value.messages.push(userMessage)
+    }
+  } catch (error) {
+    ElMessage.error('保存消息失败')
+    return
   }
-  session.messages.push(userMessage)
+
   aiInput.value = ''
   aiLoading.value = true
+
   try {
+    // Prepare messages for AI
+    const messages = currentChatDetail.value?.messages.map(msg => ({
+      role: msg.role,
+      content: msg.content,
+    })) ?? []
+    
+    // 构建system message，包含基础提示和背景信息
+    let systemContent = aiSystemPrompt
+    if (aiContextInfo.value) {
+      systemContent += `\n\n以下是背景信息，请参考这些信息来回答用户的问题：\n\n${aiContextInfo.value}`
+    }
+    
     const payload: AiMessage[] = [
-      { role: 'system', content: aiSystemPrompt },
-      ...session.messages.map(({ role, content: msgContent }) => ({ role, content: msgContent })),
+      { role: 'system', content: systemContent },
+      ...messages,
     ]
+    
     const answerPromise = sendAiChat(payload)
     const titlePromise = shouldSummarizeTitle ? summarizeQuestionTitle(content) : null
     const answer = await answerPromise
-    session.messages.push({
-      id: createId(),
+    
+    // Save assistant message
+    const assistantMessage = await chatApi.createChatMessage({
+      chatId: activeChatId.value,
       role: 'assistant',
       content: answer,
-      timestamp: Date.now(),
     })
-    if (titlePromise) {
-      session.title = await titlePromise
+    if (assistantMessage && currentChatDetail.value) {
+      currentChatDetail.value.messages.push(assistantMessage)
+    }
+    
+    // Update title if needed
+    if (titlePromise && currentChatDetail.value) {
+      const newTitle = await titlePromise
+      await chatApi.updateChat({
+        id: activeChatId.value,
+        title: newTitle,
+      })
+      if (currentChatDetail.value) {
+        currentChatDetail.value.title = newTitle
+      }
+      await loadChatSessions()
     }
   } catch (error) {
-    session.messages.push({
-      id: createId(),
-      role: 'assistant',
-      content: '抱歉，Mido AI 暂时无法响应，请稍后重试。',
-      timestamp: Date.now(),
-    })
+    ElMessage.error('AI 响应失败，请稍后重试')
+    if (currentChatDetail.value) {
+      const errorMessage = await chatApi.createChatMessage({
+        chatId: activeChatId.value,
+        role: 'assistant',
+        content: '抱歉，Mido AI 暂时无法响应，请稍后重试。',
+      })
+      if (errorMessage) {
+        currentChatDetail.value.messages.push(errorMessage)
+      }
+    }
   } finally {
     aiLoading.value = false
   }
 }
 
-const formatAiSessionDate = (timestamp: number) => {
-  const date = new Date(timestamp)
-  return `${date.getMonth() + 1}/${date.getDate()}`
+// Message selection for saving as note
+const toggleMessageSelection = (messageId: string) => {
+  if (selectedMessageIds.value.has(messageId)) {
+    selectedMessageIds.value.delete(messageId)
+  } else {
+    selectedMessageIds.value.add(messageId)
+  }
+}
+
+const toggleSelectMode = () => {
+  isSelectingMessages.value = !isSelectingMessages.value
+  if (!isSelectingMessages.value) {
+    selectedMessageIds.value.clear()
+  }
+}
+
+const handleSaveSelectedMessagesAsNote = async () => {
+  if (selectedMessageIds.value.size === 0) {
+    ElMessage.warning('请先选择要保存的消息')
+    return
+  }
+
+  if (!currentChatDetail.value) return
+
+  const selectedMessages = currentChatDetail.value.messages.filter(msg => 
+    selectedMessageIds.value.has(msg.id)
+  ).sort((a, b) => {
+    const dateA = new Date(a.createdAt).getTime()
+    const dateB = new Date(b.createdAt).getTime()
+    return dateA - dateB
+  })
+
+  // Build note content
+  const noteTitle = currentChatDetail.value.title || '保存的对话'
+  let noteContent = `# ${noteTitle}\n\n`
+  
+  selectedMessages.forEach(msg => {
+    const roleLabel = msg.role === 'user' ? '用户' : 'AI助手'
+    noteContent += `## ${roleLabel}\n\n${msg.content}\n\n---\n\n`
+  })
+
+  // 直接保存到根目录（未分类），不询问用户
+  try {
+    const createdNote = await noteApi.createNote({
+      title: noteTitle,
+      content: noteContent,
+      folderId: undefined, // 保存到根目录
+    })
+
+    if (createdNote) {
+      ElMessage.success('已保存为笔记')
+      selectedMessageIds.value.clear()
+      isSelectingMessages.value = false
+      // Switch to note editor
+      isAiMode.value = false
+      await noteStore.selectNote(createdNote.id)
+    }
+  } catch (error: any) {
+    if (error !== 'cancel') {
+      ElMessage.error('保存笔记失败')
+    }
+  }
+}
+
+// 加载所有笔记用于背景信息选择
+const loadAllNotesForContext = async () => {
+  loadingContextNotes.value = true
+  allNotesForContext.value = []
+  
+  try {
+    // 递归收集所有文件夹的笔记
+    const collectNotes = async (folders: FolderNode[]) => {
+      for (const folder of folders) {
+        // 确保该文件夹的笔记已加载
+        if (!noteStore.state.notesMap[folder.id]) {
+          try {
+            const res = await noteApi.fetchNoteList({ folderId: folder.id, page: 1, pageSize: 100 })
+            noteStore.state.notesMap[folder.id] = res.list || []
+          } catch (error) {
+            console.error(`Failed to load notes for folder ${folder.id}:`, error)
+          }
+        }
+        
+        const notes = noteStore.state.notesMap[folder.id] || []
+        notes.forEach(note => {
+          allNotesForContext.value.push({
+            id: note.id,
+            title: note.title,
+            folderId: folder.id,
+            folderName: folder.name,
+          })
+        })
+        
+        if (folder.children && folder.children.length > 0) {
+          await collectNotes(folder.children)
+        }
+      }
+    }
+    
+    // 也收集根目录的笔记（未分类）
+    try {
+      const rootFolder = noteStore.state.folders.find((folder) => !folder.parentId && folder.name === '未分类')
+      if (rootFolder) {
+        if (!noteStore.state.notesMap[rootFolder.id]) {
+          const res = await noteApi.fetchNoteList({ folderId: rootFolder.id, page: 1, pageSize: 100 })
+          noteStore.state.notesMap[rootFolder.id] = res.list || []
+        }
+        const notes = noteStore.state.notesMap[rootFolder.id] || []
+        notes.forEach(note => {
+          allNotesForContext.value.push({
+            id: note.id,
+            title: note.title,
+            folderId: rootFolder.id,
+            folderName: '未分类',
+          })
+        })
+      }
+    } catch (error) {
+      console.error('Failed to load root notes:', error)
+    }
+    
+    await collectNotes(noteStore.state.folders)
+  } finally {
+    loadingContextNotes.value = false
+  }
+}
+
+// 打开笔记选择对话框
+const handleSelectContextNote = async () => {
+  contextNoteSearchKeyword.value = ''
+  await loadAllNotesForContext()
+  if (allNotesForContext.value.length === 0) {
+    ElMessage.warning('没有可用的笔记')
+    return
+  }
+  showContextNoteDialog.value = true
+}
+
+// 确认选择笔记作为背景信息
+const confirmContextNote = async (noteId: string) => {
+  try {
+    const noteDetail = await noteApi.fetchNoteById(noteId)
+    if (noteDetail) {
+      // 提取纯文本内容（如果是HTML，去掉标签）
+      let content = noteDetail.content
+      // 如果包含HTML标签，提取文本内容
+      if (/<[a-z]+[^>]*>/i.test(content)) {
+        const div = document.createElement('div')
+        div.innerHTML = content
+        content = div.textContent || div.innerText || ''
+      }
+      aiContextInfo.value = content
+      contextNoteTitle.value = noteDetail.title
+      showContextNoteDialog.value = false
+      ElMessage.success(`已加载背景信息：${noteDetail.title}`)
+    } else {
+      ElMessage.error('获取笔记内容失败')
+    }
+  } catch (error) {
+    ElMessage.error('加载笔记内容失败')
+  }
+}
+
+// 过滤笔记列表
+const filteredContextNotes = computed(() => {
+  if (!contextNoteSearchKeyword.value) {
+    return allNotesForContext.value
+  }
+  const keyword = contextNoteSearchKeyword.value.toLowerCase()
+  return allNotesForContext.value.filter(note => 
+    note.title.toLowerCase().includes(keyword) || 
+    note.folderName.toLowerCase().includes(keyword)
+  )
+})
+
+// Chat folder management
+const loadChatFolders = async () => {
+  loadingChatFolders.value = true
+  try {
+    chatFolders.value = await chatFolderApi.fetchChatFolderTree()
+  } catch (error) {
+    ElMessage.error('加载对话文件夹失败')
+  } finally {
+    loadingChatFolders.value = false
+  }
+}
+
+const handleCreateChatFolder = async (payload: { parentId?: string; name: string; parentIsDefaultRoot?: boolean }) => {
+  try {
+    await chatFolderApi.createChatFolder({ name: payload.name, parentId: payload.parentId })
+    ElMessage.success('文件夹已创建')
+    await loadChatFolders()
+  } catch (error: any) {
+    ElMessage.error(error.response?.data?.message || '创建文件夹失败')
+  }
+}
+
+const handleRenameChatFolder = async (payload: { id: string; name: string }) => {
+  try {
+    await chatFolderApi.renameChatFolder(payload)
+    ElMessage.success('文件夹已重命名')
+    await loadChatFolders()
+  } catch (error: any) {
+    ElMessage.error(error.response?.data?.message || '重命名文件夹失败')
+  }
+}
+
+const handleMoveChatFolder = async (payload: { id: string; newParentId?: string }) => {
+  try {
+    await chatFolderApi.moveChatFolder(payload)
+    ElMessage.success('文件夹已移动')
+    await loadChatFolders()
+  } catch (error: any) {
+    ElMessage.error(error.response?.data?.message || '移动文件夹失败')
+  }
+}
+
+const handleDeleteChatFolder = async (payload: { id: string }) => {
+  const id = payload.id
+  try {
+    await ElMessageBox.confirm('删除文件夹将同时删除其下所有对话，是否继续？', '删除文件夹', {
+      type: 'warning',
+    })
+    await chatFolderApi.deleteChatFolder(id)
+    ElMessage.success('文件夹已删除')
+    await loadChatFolders()
+    if (selectedChatFolderId.value === id) {
+      selectedChatFolderId.value = null
+    }
+    await loadChatSessions()
+  } catch (error: any) {
+    if (error !== 'cancel') {
+      ElMessage.error(error.response?.data?.message || '删除文件夹失败')
+    }
+  }
+}
+
+const handleSelectChatFolder = async (id: string | null) => {
+  if (!id) {
+    selectedChatFolderId.value = null
+    await loadChatSessions()
+    return
+  }
+  
+  // Check if it's a chat ID (starts with 'chat-')
+  if (id.startsWith('chat-')) {
+    await selectAiSession(id.replace('chat-', ''))
+    return
+  }
+  
+  // It's a folder ID - don't do anything, just let the tree expand/collapse naturally
+  // The folder structure is already shown in the tree, we don't need to filter
+}
+
+// 监听 localStorage 中 token 的变化
+if (typeof window !== 'undefined') {
+  window.addEventListener('storage', (e) => {
+    if (e.key === 'token') {
+      console.log('检测到 token 变化，重新加载用户信息')
+      loadUserInfo()
+    }
+  })
 }
 
 onMounted(async () => {
+  // 确保在挂载时重新加载用户信息
+  loadUserInfo()
   await noteStore.init()
+  await loadChatFolders()
+  await loadChatSessions()
 })
 
 const folderTreeWithNotes = computed<TreeNode[]>(() => {
@@ -258,6 +703,48 @@ const folderTreeWithNotes = computed<TreeNode[]>(() => {
     })
 
   return build(noteStore.state.folders)
+})
+
+const chatFolderTreeWithChats = computed<TreeNode[]>(() => {
+  const build = (folders: ChatFolderNode[]): TreeNode[] =>
+    folders.map((folder) => {
+      const folderChats = chatSessions.value.filter(chat => chat.folderId === folder.id)
+      const childFolders = folder.children ? build(folder.children) : []
+      const children = [
+        ...childFolders,
+        ...folderChats.map((chat) => ({
+          treeKey: `chat-${chat.id}`,
+          id: String(chat.id),
+          name: chat.title || '未命名对话',
+          type: 'note' as const, // Use 'note' type so FolderTree can handle it
+        })),
+      ]
+      return {
+        treeKey: `folder-${folder.id}`,
+        id: String(folder.id),
+        name: folder.name,
+        type: 'folder' as const,
+        children: children.length > 0 ? children : [], // Keep empty array for empty folders
+      }
+    })
+
+  const rootChats = chatSessions.value.filter(chat => !chat.folderId)
+  const tree = build(chatFolders.value)
+  
+  // Add root chats if any
+  if (rootChats.length > 0 || tree.length === 0) {
+    return [
+      ...tree,
+      ...rootChats.map((chat) => ({
+        treeKey: `chat-${chat.id}`,
+        id: String(chat.id),
+        name: chat.title || '未命名对话',
+        type: 'note' as const,
+      })),
+    ]
+  }
+
+  return tree
 })
 
 const currentTreeKey = computed(() => {
@@ -298,10 +785,48 @@ const handleSaveNote = async (payload: {
 
 const handleCreateFolder = async (payload: { parentId?: string; name: string; parentIsDefaultRoot?: boolean }) => {
   if (payload.parentIsDefaultRoot) {
-    ElMessage.error('“未分类”下不能创建文件夹')
+    ElMessage.error('"未分类"下不能创建文件夹')
     return
   }
-  await noteStore.createFolder(payload.name, payload.parentId)
+  try {
+    // 如果指定了 parentId，验证它是否存在
+    let validParentId = payload.parentId
+    if (validParentId) {
+      const folderExists = noteStore.state.folders.some(f => 
+        String(f.id) === validParentId || 
+        (f.children && findFolderInTree(f.children, validParentId))
+      )
+      if (!folderExists) {
+        console.warn('指定的父文件夹不存在，将创建为根文件夹')
+        validParentId = undefined
+      }
+    }
+    await noteStore.createFolder(payload.name, validParentId)
+  } catch (error: any) {
+    // 如果后端返回"父文件夹不存在"错误，尝试创建为根文件夹
+    if (error?.response?.data?.message?.includes('父文件夹不存在')) {
+      try {
+        await noteStore.createFolder(payload.name, undefined)
+      } catch (retryError) {
+        ElMessage.error('创建失败，请稍后重试')
+      }
+    } else {
+      ElMessage.error(error?.response?.data?.message || '创建失败，请稍后重试')
+    }
+  }
+}
+
+// 辅助函数：在文件夹树中查找文件夹
+const findFolderInTree = (folders: FolderNode[], targetId: string): boolean => {
+  for (const folder of folders) {
+    if (String(folder.id) === targetId) {
+      return true
+    }
+    if (folder.children && findFolderInTree(folder.children, targetId)) {
+      return true
+    }
+  }
+  return false
 }
 
 const generateDefaultName = (type: 'note' | 'folder') => {
@@ -321,10 +846,22 @@ const handleCreate = async (type: 'note' | 'folder') => {
   try {
     if (type === 'folder') {
       if (defaultRootId.value && noteStore.state.selectedFolderId === defaultRootId.value) {
-        ElMessage.error('“未分类”下不能创建文件夹')
+        ElMessage.error('"未分类"下不能创建文件夹')
         return
       }
-      await noteStore.createFolder(name, noteStore.state.selectedFolderId ?? undefined)
+      // 验证选中的文件夹是否存在
+      let validParentId = noteStore.state.selectedFolderId
+      if (validParentId) {
+        const folderExists = noteStore.state.folders.some(f => 
+          String(f.id) === validParentId || 
+          (f.children && findFolderInTree(f.children, validParentId))
+        )
+        if (!folderExists) {
+          console.warn('选中的文件夹不存在，将创建为根文件夹')
+          validParentId = undefined
+        }
+      }
+      await noteStore.createFolder(name, validParentId ?? undefined)
     } else {
       await noteStore.createNote({
         title: name,
@@ -332,8 +869,17 @@ const handleCreate = async (type: 'note' | 'folder') => {
         folderId: noteStore.state.selectedFolderId ?? undefined,
       })
     }
-  } catch {
-    ElMessage.error('创建失败，请稍后重试')
+  } catch (error: any) {
+    // 如果后端返回"父文件夹不存在"错误，尝试创建为根文件夹
+    if (type === 'folder' && error?.response?.data?.message?.includes('父文件夹不存在')) {
+      try {
+        await noteStore.createFolder(name, undefined)
+      } catch (retryError) {
+        ElMessage.error('创建失败，请稍后重试')
+      }
+    } else {
+      ElMessage.error(error?.response?.data?.message || '创建失败，请稍后重试')
+    }
   }
 }
 
@@ -378,7 +924,7 @@ const closeSearchPanel = () => {
   searchKeyword.value = ''
 }
 
-const handleNavClick = (item: { label: string; action?: string }) => {
+const handleNavClick = async (item: { label: string; action?: string }) => {
   if (item.action === 'search') {
     openSearchPanel()
     return
@@ -393,6 +939,11 @@ const handleNavClick = (item: { label: string; action?: string }) => {
   }
   if (item.action === 'create-folder') {
     handleCreate('folder')
+    return
+  }
+  if (item.action === 'create-chat-folder') {
+    const name = generateDefaultName('folder')
+    await handleCreateChatFolder({ name, parentId: selectedChatFolderId.value ?? undefined })
     return
   }
 }
@@ -527,23 +1078,25 @@ onBeforeUnmount(() => {
               {{ isFolderTreeCollapsed ? '展开' : '收起' }}
             </button>
           </div>
-          <FolderTree
-            v-show="!isFolderTreeCollapsed"
-            class="folder-tree-wrapper"
-            :data="folderTreeWithNotes"
-            :current-key="currentTreeKey"
-            :loading="noteStore.state.loadingFolders"
-            :show-toolbar="false"
-            @select-folder="handleSelectFolder"
-            @select-note="handleSelectNote"
-            @create-folder="handleCreateFolder"
-            @rename-folder="handleRenameFolder"
-            @delete-folder="handleDeleteFolder"
-            @rename-note="handleRenameNoteFromTree"
-            @delete-note="handleDeleteNoteFromTree"
-            @move-folder="handleMoveFolder"
-            @move-note="handleMoveNote"
-          />
+          <transition name="section-fade">
+            <FolderTree
+              v-show="!isFolderTreeCollapsed"
+              class="folder-tree-wrapper"
+              :data="folderTreeWithNotes"
+              :current-key="currentTreeKey"
+              :loading="noteStore.state.loadingFolders"
+              :show-toolbar="false"
+              @select-folder="handleSelectFolder"
+              @select-note="handleSelectNote"
+              @create-folder="handleCreateFolder"
+              @rename-folder="handleRenameFolder"
+              @delete-folder="handleDeleteFolder"
+              @rename-note="handleRenameNoteFromTree"
+              @delete-note="handleDeleteNoteFromTree"
+              @move-folder="handleMoveFolder"
+              @move-note="handleMoveNote"
+            />
+          </transition>
         </div>
         <div class="workspace-panel__section ai-session-section">
           <div class="ai-session-header">
@@ -557,23 +1110,25 @@ onBeforeUnmount(() => {
           </div>
           <transition name="section-fade">
             <div v-show="!isAiSessionCollapsed">
-              <p v-if="aiSessions.length === 0" class="ai-session-placeholder">
+              <!-- Chat folder tree with chats -->
+              <FolderTree
+                class="folder-tree-wrapper chat-tree-wrapper"
+                :data="chatFolderTreeWithChats"
+                :current-key="activeChatId ? `chat-${activeChatId}` : (selectedChatFolderId ? `folder-${selectedChatFolderId}` : null)"
+                :loading="loadingChatFolders || chatLoading"
+                :show-toolbar="false"
+                @select-folder="handleSelectChatFolder"
+                @create-folder="handleCreateChatFolder"
+                @rename-folder="handleRenameChatFolder"
+                @delete-folder="handleDeleteChatFolder"
+                @move-folder="handleMoveChatFolder"
+                @select-note="selectAiSession"
+                @delete-note="deleteAiSession"
+                @move-note="handleMoveNote"
+              />
+              <p v-if="chatFolderTreeWithChats.length === 0 && !loadingChatFolders && !chatLoading" class="ai-session-placeholder">
                 还没有对话，点击上方按钮开启一次灵感碰撞。
               </p>
-              <ul v-else class="ai-session-list">
-                <li
-                  v-for="session in aiSessions"
-                  :key="session.id"
-                  :class="['ai-session-item', { active: session.id === activeAiSessionId && isAiMode }]"
-                  @click="selectAiSession(session.id)"
-                >
-                  <div class="ai-session-item__title">{{ session.title }}</div>
-                  <div class="ai-session-item__meta">
-                    <span>{{ formatAiSessionDate(session.createdAt) }}</span>
-                    <button type="button" class="ai-session-delete" @click.stop="deleteAiSession(session.id)">×</button>
-                  </div>
-                </li>
-              </ul>
             </div>
           </transition>
         </div>
@@ -588,16 +1143,39 @@ onBeforeUnmount(() => {
       <section class="note-workspace">
         <div v-if="isAiMode" class="ai-panel">
           <div v-if="currentAiMessages.length" class="ai-conversation">
+            <div class="ai-conversation-toolbar" v-if="isSelectingMessages || selectedMessageIds.size > 0">
+              <button class="ai-toolbar-button" @click="toggleSelectMode">
+                {{ isSelectingMessages ? '取消选择' : '选择消息' }}
+              </button>
+              <button 
+                v-if="selectedMessageIds.size > 0" 
+                class="ai-toolbar-button ai-toolbar-button--primary" 
+                @click="handleSaveSelectedMessagesAsNote"
+              >
+                保存为笔记 ({{ selectedMessageIds.size }})
+              </button>
+            </div>
             <div
               v-for="message in currentAiMessages"
               :key="message.id"
-              :class="['ai-message', message.role]"
+              :class="['ai-message', message.role, { 'ai-message--selected': selectedMessageIds.has(message.id) }]"
+              @click="isSelectingMessages ? toggleMessageSelection(message.id) : null"
             >
+              <div v-if="isSelectingMessages" class="ai-message__checkbox">
+                <input 
+                  type="checkbox" 
+                  :checked="selectedMessageIds.has(message.id)"
+                  @click.stop="toggleMessageSelection(message.id)"
+                />
+              </div>
               <div class="ai-message__avatar">
                 {{ message.role === 'assistant' ? '✨' : userDisplayName.charAt(0).toUpperCase() }}
               </div>
               <div class="ai-message__bubble">
-                <p>{{ message.content }}</p>
+                <div v-if="message.role === 'assistant'" class="ai-message__markdown">
+                  <v-md-preview :text="message.content"></v-md-preview>
+                </div>
+                <p v-else>{{ message.content }}</p>
               </div>
             </div>
           </div>
@@ -605,9 +1183,18 @@ onBeforeUnmount(() => {
             <div class="ai-hero__avatar">🍎</div>
             <h2>甜你心，知你意。</h2>
             <p>询问、搜索或制作任何内容...</p>
+            <button 
+              v-if="currentAiMessages.length > 0" 
+              class="ai-hero-button" 
+              @click="toggleSelectMode"
+            >
+              选择消息
+            </button>
           </div>
           <form class="ai-input-card" @submit.prevent="handleSendAiMessage">
-            <button class="ai-meta-button" type="button">@ 添加背景信息</button>
+            <button class="ai-meta-button" type="button" @click="handleSelectContextNote">
+              @ 添加背景信息{{ contextNoteTitle ? ` (${contextNoteTitle})` : '' }}
+            </button>
             <textarea
               v-model="aiInput"
               :disabled="aiLoading"
@@ -616,9 +1203,13 @@ onBeforeUnmount(() => {
             ></textarea>
             <div class="ai-input-footer">
               <div class="ai-input-hints">
-                <span>自动</span>
-                <span>👓</span>
-                <span>全部信息源</span>
+                <button 
+                  type="button" 
+                  class="ai-hint-button"
+                  @click="toggleSelectMode"
+                >
+                  {{ isSelectingMessages ? '取消选择' : '选择消息' }}
+                </button>
               </div>
               <button class="ai-submit" type="submit" :disabled="aiLoading || !aiInput.trim()">
                 {{ aiLoading ? '思考中…' : '发送' }}
@@ -685,6 +1276,46 @@ onBeforeUnmount(() => {
         </div>
       </div>
     </div>
+
+    <!-- 笔记选择对话框 -->
+    <el-dialog
+      v-model="showContextNoteDialog"
+      title="选择背景信息"
+      width="600px"
+      :close-on-click-modal="false"
+    >
+      <div class="context-note-selector">
+        <el-input
+          v-model="contextNoteSearchKeyword"
+          placeholder="搜索笔记标题或文件夹..."
+          clearable
+          prefix-icon="Search"
+          style="margin-bottom: 16px"
+        />
+        <el-scrollbar height="400px">
+          <el-skeleton v-if="loadingContextNotes" :rows="5" animated />
+          <div v-else-if="filteredContextNotes.length === 0" class="empty-notes">
+            <el-empty description="没有找到笔记" />
+          </div>
+          <div v-else class="note-list-items">
+            <div
+              v-for="note in filteredContextNotes"
+              :key="note.id"
+              class="note-item-card"
+              @click="confirmContextNote(note.id)"
+            >
+              <div class="note-item-card__title">{{ note.title }}</div>
+              <div class="note-item-card__meta">
+                <el-tag size="small" type="info">{{ note.folderName }}</el-tag>
+              </div>
+            </div>
+          </div>
+        </el-scrollbar>
+      </div>
+      <template #footer>
+        <el-button @click="showContextNoteDialog = false">取消</el-button>
+      </template>
+    </el-dialog>
 
   </div>
 </template>
@@ -893,6 +1524,12 @@ onBeforeUnmount(() => {
 
 .nav-icon {
   font-size: 16px;
+}
+
+.chat-tree-wrapper {
+  max-height: 400px;
+  overflow-y: auto;
+  margin-top: 8px;
 }
 
 .ai-session-section {
@@ -1106,6 +1743,100 @@ onBeforeUnmount(() => {
 .ai-message.user .ai-message__bubble {
   background: #2f3437;
   color: #fff;
+}
+
+.ai-conversation-toolbar {
+  display: flex;
+  gap: 8px;
+  padding: 12px;
+  background: rgba(47, 52, 55, 0.05);
+  border-radius: 12px;
+  margin-bottom: 16px;
+  align-items: center;
+}
+
+.ai-toolbar-button {
+  border: none;
+  background: rgba(47, 52, 55, 0.1);
+  border-radius: 8px;
+  padding: 6px 12px;
+  font-size: 13px;
+  color: #2f3437;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.ai-toolbar-button:hover {
+  background: rgba(47, 52, 55, 0.15);
+}
+
+.ai-toolbar-button--primary {
+  background: #2f3437;
+  color: #fff;
+  margin-left: auto;
+}
+
+.ai-toolbar-button--primary:hover {
+  background: #1a1d20;
+}
+
+.ai-message--selected {
+  background: rgba(47, 52, 55, 0.08);
+  border-radius: 12px;
+  padding: 8px;
+  margin: -8px;
+}
+
+.ai-message__checkbox {
+  display: flex;
+  align-items: center;
+  padding-right: 8px;
+}
+
+.ai-message__checkbox input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  cursor: pointer;
+}
+
+.ai-message__markdown {
+  width: 100%;
+}
+
+.ai-message__markdown :deep(.v-md-pre-wrapper) {
+  background: transparent;
+}
+
+.ai-hint-button {
+  border: none;
+  background: transparent;
+  color: #5c5e62;
+  font-size: 13px;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 6px;
+  transition: background 0.15s ease;
+}
+
+.ai-hint-button:hover {
+  background: rgba(47, 52, 55, 0.08);
+}
+
+.ai-hero-button {
+  margin-top: 16px;
+  border: 1px solid rgba(47, 52, 55, 0.2);
+  background: #fff;
+  border-radius: 12px;
+  padding: 10px 20px;
+  font-size: 14px;
+  color: #2f3437;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.ai-hero-button:hover {
+  background: #f5f7f9;
+  border-color: rgba(47, 52, 55, 0.3);
 }
 
 .ai-hero {
@@ -1332,6 +2063,49 @@ onBeforeUnmount(() => {
   text-align: center;
   color: #8a8f95;
   margin-top: 16px;
+}
+
+/* 笔记选择对话框样式 */
+.context-note-selector {
+  padding: 8px 0;
+}
+
+.note-list-items {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.note-item-card {
+  padding: 12px 16px;
+  border: 1px solid rgba(47, 52, 55, 0.12);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  background: #fff;
+}
+
+.note-item-card:hover {
+  border-color: #3b82f6;
+  background: #f8fafc;
+  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.1);
+}
+
+.note-item-card__title {
+  font-size: 15px;
+  font-weight: 500;
+  color: #2f3437;
+  margin-bottom: 6px;
+}
+
+.note-item-card__meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.empty-notes {
+  padding: 40px 0;
 }
 
 </style>

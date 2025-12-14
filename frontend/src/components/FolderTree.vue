@@ -204,7 +204,15 @@ const allowDrop = (draggingNode: any, dropNode: any, type: 'prev' | 'next' | 'in
     return true
   }
   if (dragType === 'note') {
-    return dropNode && dropType === 'folder' && type === 'inner'
+    // Allow dropping into folders
+    if (dropNode && dropType === 'folder' && type === 'inner') {
+      return true
+    }
+    // Allow dropping to root (when dropNode is null or at root level)
+    if (!dropNode || type !== 'inner') {
+      return true
+    }
+    return false
   }
   return false
 }
@@ -229,8 +237,17 @@ const handleDrop = (dragNode: any, dropNode: any, dropType: 'before' | 'after' |
   }
 
   if (dragType === 'note') {
-    if (!dropNode || dropNode.data?.type !== 'folder') return
-    emit('move-note', { id: dragId, targetFolderId: dropNode.data.id as string })
+    let targetFolderId: string | undefined
+    if (dropNode && dropNode.data?.type === 'folder' && dropType === 'inner') {
+      // Dropped into a folder
+      targetFolderId = dropNode.data.id as string
+    } else if (!dropNode || dropType !== 'inner') {
+      // Dropped to root level (before/after another node or to empty area)
+      targetFolderId = undefined
+    } else {
+      return
+    }
+    emit('move-note', { id: dragId, targetFolderId })
   }
 }
 </script>

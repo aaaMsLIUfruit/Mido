@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import type { UploadFile } from 'element-plus'
 import type { NoteDetail } from '../api/note'
@@ -8,6 +8,7 @@ import { EditorContent, useEditor } from '@tiptap/vue-3'
 import StarterKit from '@tiptap/starter-kit'
 import Image from '@tiptap/extension-image'
 import { Extension, markInputRule } from '@tiptap/core'
+import VMdPreview from '@kangc/v-md-editor/lib/preview'
 
 const props = defineProps<{
   note: NoteDetail | null
@@ -27,6 +28,19 @@ const form = reactive({
 })
 
 const imageWidth = ref(680)
+
+const isMarkdownContent = computed(() => {
+  if (!form.content || form.content.trim() === '') return false
+  
+  const content = form.content.trim()
+  
+  if (/<[a-z]+[^>]*>/i.test(content)) {
+    return false
+  }
+  
+  const explicitMarkdownRegex = /^##\s*(用户|AI助手|User|AI|助手)/m
+  return explicitMarkdownRegex.test(content)
+})
 
 const boldInputRegex = /(?:^|[\s>])(\*\*|__|＊＊|＿＿)([^*_]+?)(\1)$/
 const italicInputRegex = /(?:^|[\s>])(\*|_|＊|＿)([^*_]+?)(\1)$/
@@ -86,7 +100,10 @@ const editor = useEditor({
   content: '',
   autofocus: 'end',
   onUpdate: ({ editor }) => {
-    form.content = editor.getHTML()
+    // 只有在非Markdown模式下才更新内容
+    if (!isMarkdownContent.value) {
+      form.content = editor.getHTML()
+    }
   },
 })
 
@@ -94,7 +111,15 @@ watch(
   editor,
   (instance) => {
     if (instance) {
-      instance.commands.setContent(form.content || '<p></p>', false)
+      // 只有在非Markdown模式下才设置内容到编辑器
+      if (!isMarkdownContent.value) {
+        let contentToSet = form.content || '<p></p>'
+        // 如果内容不是HTML格式（没有标签），转换为HTML格式
+        if (contentToSet && !/<[a-z][\s\S]*>/i.test(contentToSet)) {
+          contentToSet = `<p>${contentToSet}</p>`
+        }
+        instance.commands.setContent(contentToSet, false)
+      }
       instance.on('selectionUpdate', ({ editor }) => {
         if (editor.isActive('image')) {
           const width = editor.getAttributes('image').width
@@ -108,8 +133,18 @@ watch(
 )
 
 const applyEditorContent = () => {
+  // 如果是Markdown内容，不需要设置到编辑器
+  if (isMarkdownContent.value) {
+    return
+  }
   if (editor.value && form.content !== editor.value.getHTML()) {
-    editor.value.commands.setContent(form.content || '<p></p>', false)
+    // 如果内容不是HTML格式（没有标签），转换为HTML格式
+    let contentToSet = form.content || '<p></p>'
+    if (contentToSet && !/<[a-z][\s\S]*>/i.test(contentToSet)) {
+      // 纯文本内容，转换为HTML
+      contentToSet = `<p>${contentToSet}</p>`
+    }
+    editor.value.commands.setContent(contentToSet, false)
   }
 }
 
@@ -208,6 +243,7 @@ onBeforeUnmount(() => {
         <el-input v-model="form.title" class="title-input" placeholder="无标题文档" />
         <div class="editor-actions">
           <el-upload
+            v-if="!isMarkdownContent"
             class="cover-upload"
             :auto-upload="false"
             :show-file-list="false"
@@ -235,7 +271,10 @@ onBeforeUnmount(() => {
       </div>
       <div class="notion-editor">
         <div class="notion-editor__page">
-          <EditorContent v-if="editor" :editor="editor" />
+          <EditorContent v-if="editor && !isMarkdownContent" :editor="editor" />
+          <div v-if="isMarkdownContent" class="markdown-preview">
+            <v-md-preview :text="form.content"></v-md-preview>
+          </div>
         </div>
       </div>
     </template>
@@ -347,6 +386,38 @@ onBeforeUnmount(() => {
 }
 
 .notion-editor :deep(ul) {
+  padding-left: 1.4em;
+}
+
+.markdown-preview {
+  min-height: 100%;
+}
+
+.markdown-preview :deep(.github-markdown-body) {
+  padding: 0;
+  font-size: 16px;
+  line-height: 1.8;
+  color: inherit;
+  background: transparent;
+}
+
+.markdown-preview :deep(h1),
+.markdown-preview :deep(h2),
+.markdown-preview :deep(h3),
+.markdown-preview :deep(h4),
+.markdown-preview :deep(h5),
+.markdown-preview :deep(h6) {
+  margin: 1.2em 0 0.6em;
+  font-weight: 600;
+  color: inherit;
+}
+
+.markdown-preview :deep(p) {
+  margin: 0.8em 0;
+}
+
+.markdown-preview :deep(ul),
+.markdown-preview :deep(ol) {
   padding-left: 1.4em;
 }
 </style>

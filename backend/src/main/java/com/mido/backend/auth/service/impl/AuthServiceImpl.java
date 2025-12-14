@@ -4,6 +4,8 @@ import com.mido.backend.auth.dto.AuthResponse;
 import com.mido.backend.auth.dto.LoginRequest;
 import com.mido.backend.auth.dto.RegisterRequest;
 import com.mido.backend.auth.service.AuthService;
+import com.mido.backend.note.entity.NoteFolder;
+import com.mido.backend.note.service.NoteFolderService;
 import com.mido.backend.security.JwtUtil;
 import com.mido.backend.user.entity.User;
 import com.mido.backend.user.service.UserService;
@@ -26,6 +28,7 @@ public class AuthServiceImpl implements AuthService {
     private final PasswordEncoder passwordEncoder;
     private final AuthenticationManager authenticationManager;
     private final JwtUtil jwtUtil;
+    private final NoteFolderService noteFolderService;
 
     @Override
     @Transactional
@@ -41,6 +44,16 @@ public class AuthServiceImpl implements AuthService {
         user.setCreatedAt(LocalDateTime.now());
 
         userService.save(user);
+        
+        // 为新用户自动创建默认的"未分类"文件夹
+        NoteFolder defaultFolder = new NoteFolder();
+        defaultFolder.setUserId(user.getId());
+        defaultFolder.setName("未分类");
+        defaultFolder.setParentId(null);
+        defaultFolder.setIsDeleted(0);
+        defaultFolder.setCreatedAt(LocalDateTime.now());
+        noteFolderService.save(defaultFolder);
+        
         String token = jwtUtil.generateToken(user);
         return AuthResponse.builder()
                 .message("注册成功")
