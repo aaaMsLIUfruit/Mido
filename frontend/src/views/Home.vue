@@ -790,11 +790,12 @@ const handleCreateFolder = async (payload: { parentId?: string; name: string; pa
   }
   try {
     // 如果指定了 parentId，验证它是否存在
-    let validParentId = payload.parentId
+    let validParentId: string | undefined = payload.parentId
     if (validParentId) {
+      const targetId = validParentId
       const folderExists = noteStore.state.folders.some(f => 
-        String(f.id) === validParentId || 
-        (f.children && findFolderInTree(f.children, validParentId))
+        String(f.id) === targetId || 
+        (f.children && findFolderInTree(f.children, targetId))
       )
       if (!folderExists) {
         console.warn('指定的父文件夹不存在，将创建为根文件夹')
@@ -850,18 +851,19 @@ const handleCreate = async (type: 'note' | 'folder') => {
         return
       }
       // 验证选中的文件夹是否存在
-      let validParentId = noteStore.state.selectedFolderId
+      let validParentId: string | undefined = noteStore.state.selectedFolderId ?? undefined
       if (validParentId) {
+        const targetId = validParentId
         const folderExists = noteStore.state.folders.some(f => 
-          String(f.id) === validParentId || 
-          (f.children && findFolderInTree(f.children, validParentId))
+          String(f.id) === targetId || 
+          (f.children && findFolderInTree(f.children, targetId))
         )
         if (!folderExists) {
           console.warn('选中的文件夹不存在，将创建为根文件夹')
           validParentId = undefined
         }
       }
-      await noteStore.createFolder(name, validParentId ?? undefined)
+      await noteStore.createFolder(name, validParentId)
     } else {
       await noteStore.createNote({
         title: name,
@@ -913,6 +915,30 @@ const handleRenameNoteFromTree = async (payload: { id: string; name: string }) =
 
 const handleMoveNote = async (payload: { id: string; targetFolderId?: string }) => {
   await noteStore.moveNote(payload.id, payload.targetFolderId)
+}
+
+// AI 对话拖拽移动到对话文件夹
+const handleMoveChat = async (payload: { id: string; targetFolderId?: string }) => {
+  try {
+    await chatApi.updateChat({
+      id: payload.id,
+      folderId: payload.targetFolderId,
+    })
+
+    // 同步本地状态，避免 UI 闪烁
+    const target = chatSessions.value.find((c) => c.id === payload.id)
+    if (target) {
+      target.folderId = payload.targetFolderId
+    }
+    if (currentChatDetail.value?.id === payload.id) {
+      currentChatDetail.value.folderId = payload.targetFolderId
+    }
+
+    ElMessage.success('对话已移动')
+    await loadChatSessions()
+  } catch (error: any) {
+    ElMessage.error(error?.response?.data?.message || '移动对话失败')
+  }
 }
 
 const openSearchPanel = () => {
@@ -1124,7 +1150,7 @@ onBeforeUnmount(() => {
                 @move-folder="handleMoveChatFolder"
                 @select-note="selectAiSession"
                 @delete-note="deleteAiSession"
-                @move-note="handleMoveNote"
+                @move-note="handleMoveChat"
               />
               <p v-if="chatFolderTreeWithChats.length === 0 && !loadingChatFolders && !chatLoading" class="ai-session-placeholder">
                 还没有对话，点击上方按钮开启一次灵感碰撞。
